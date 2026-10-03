@@ -21,16 +21,27 @@ public static class PostgresReadiness
         {
             var template = config.GetConnectionString("postgresql");
             if (string.IsNullOrWhiteSpace(template)) throw new ArgumentException();
-            // Port is numeric; other replacements happen on parsed values, so secrets containing
-            // semicolons/quotes remain values rather than injecting connection-string options.
-            template = template.Replace("[dbPort]", config["dbPort"] ?? "[dbPort]");
+            // Validate substitutions before inserting opaque credentials; never scan a resolved
+            // password/username for bracketed words. Port substitution cannot introduce options.
+            if (template.Contains("[dbPort]", StringComparison.Ordinal))
+            {
+                if (!int.TryParse(config["dbPort"], out var port) || port is < 1 or > 65535)
+                    throw new ArgumentException();
+                template = template.Replace("[dbPort]", port.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
             var builder = new NpgsqlConnectionStringBuilder(template);
-            builder.Host = (builder.Host ?? "").Replace("[dbName]", config["dbName"] ?? "[dbName]");
-            builder.Username = builder.Username?.Replace("[dbUser]", config["dbUser"] ?? "[dbUser]");
-            builder.Password = builder.Password?.Replace("[dbPassword]", config["dbPassword"] ?? "[dbPassword]");
+            string? Substitute(string? value, string token, string? replacement)
+            {
+                if (value?.Contains(token, StringComparison.Ordinal) != true) return value;
+                if (replacement is null) throw new ArgumentException();
+                return value.Replace(token, replacement, StringComparison.Ordinal);
+            }
+            builder.Host = Substitute(builder.Host, "[dbName]", config["dbName"]) ?? "";
+            builder.Username = Substitute(builder.Username, "[dbUser]", config["dbUser"]);
+            builder.Password = Substitute(builder.Password, "[dbPassword]", config["dbPassword"]);
             if (string.IsNullOrWhiteSpace(builder.Host) || string.IsNullOrWhiteSpace(builder.Database)
-                || string.IsNullOrWhiteSpace(builder.Username)
-                || Regex.IsMatch(builder.ConnectionString, @"\[[A-Za-z][A-Za-z0-9_]*\]"))
+                || string.IsNullOrWhiteSpace(builder.Username) || builder.Port is < 1 or > 65535
+                || Regex.IsMatch(builder.Host + ";" + builder.Database, @"\[[A-Za-z][A-Za-z0-9_]*\]"))
                 throw new ArgumentException();
             return builder.ConnectionString;
         }

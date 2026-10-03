@@ -35,6 +35,35 @@ async Task<(int Code, string Classification)> Probe(IConfiguration config, Cance
 foreach (var connection in new string?[] { null, "", "Host=[dbName];Username=u;Password=p;Database=d", "Host=localhost;Username=u;Password=[dbPassword];Database=d", "Host=localhost;Port=bogus", "Host=localhost;Username=u;Password=p" })
     await Test("invalid/missing/unresolved config: " + (connection is null ? "missing" : "redacted"), async () => Check((await Probe(Config(connection))).Code == 20, "must fail permanently before connecting"));
 
+foreach (var password in new[] { "p[fixture]x", "literal[dbPassword]value", "semi;quote\"value", "plain" })
+    await Test("opaque credential characters resolve without interpolation scan", () =>
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:postgresql"] = "Host=[dbName];Port=[dbPort];Username=[dbUser];Password=[dbPassword];Database=fixture",
+            ["dbName"] = "localhost", ["dbPort"] = "5432", ["dbUser"] = "reader", ["dbPassword"] = password
+        }).Build();
+        var value = (string)readiness!.GetMethod("ResolveConnectionString")!.Invoke(null, [config])!;
+        var resolved = new Npgsql.NpgsqlConnectionStringBuilder(value);
+        Check(resolved.Password == password, "opaque credential value was rejected or changed");
+        Check(resolved.Port == 5432, "typed port changed");
+        return Task.CompletedTask;
+    });
+foreach (var port in new[] { "5432;SSL Mode=Disable", "0", "65536", "missing" })
+    await Test("invalid port substitution fails before opening", () =>
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:postgresql"] = "Host=localhost;Port=[dbPort];Username=u;Password=p;Database=fixture",
+            ["dbPort"] = port == "missing" ? null : port
+        }).Build();
+        bool rejected = false;
+        try { readiness!.GetMethod("ResolveConnectionString")!.Invoke(null, [config]); }
+        catch (TargetInvocationException e) when (e.InnerException is InvalidOperationException) { rejected = true; }
+        Check(rejected, "port must be numeric/ranged before substitution");
+        return Task.CompletedTask;
+    });
+
 await Test("one authenticated SELECT 1 succeeds and closes connection", async () =>
 {
     await using var peer = new PgPeer("success");
