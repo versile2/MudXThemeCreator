@@ -1,4 +1,6 @@
 using System.IdentityModel.Tokens.Jwt;
+using System.Runtime.InteropServices;
+using MudXtra.ThemeCreator.UI.Startup;
 using Auth0.AspNetCore.Authentication;
 using Blazored.LocalStorage;
 using Microsoft.AspNetCore.Authentication;
@@ -13,9 +15,37 @@ using MudXtra.ThemeCreator.UI.Extensions;
 using Serilog;
 using Serilog.Events;
 
-var builder = WebApplication.CreateBuilder(args);
+var probeMode = args.Contains("--postgres-probe");
+var builder = WebApplication.CreateBuilder(args.Where(arg => arg != "--postgres-probe").ToArray());
 
 var config = builder.Configuration;
+
+// Probe mode returns before registering/building any application services. Bare startup
+// also checks once: guard success is not a reusable readiness token if PostgreSQL disappears.
+using var shutdown = new CancellationTokenSource();
+ConsoleCancelEventHandler cancelHandler = (_, e) => { e.Cancel = true; _ = shutdown.CancelAsync(); };
+Console.CancelKeyPress += cancelHandler;
+using var terminate = OperatingSystem.IsLinux()
+    ? PosixSignalRegistration.Create(PosixSignal.SIGTERM, context => { context.Cancel = true; _ = shutdown.CancelAsync(); })
+    : null;
+using var interrupt = OperatingSystem.IsLinux()
+    ? PosixSignalRegistration.Create(PosixSignal.SIGINT, context => { context.Cancel = true; _ = shutdown.CancelAsync(); })
+    : null;
+ProbeResult readiness;
+try
+{
+    // Npgsql's cancellation may need a separate TCP handshake. The process deadline
+    // includes that/disposal too. On timeout/shutdown, return before app construction;
+    // process exit closes any remaining sockets. This is not another retry layer.
+    readiness = await PostgresReadiness.ProbeAsync(config, shutdown.Token)
+        .WaitAsync(PostgresReadiness.AttemptTimeout, shutdown.Token);
+}
+catch (TimeoutException) { readiness = new(PostgresReadiness.TransientFailure, "attempt-timeout"); }
+catch (OperationCanceledException) { readiness = new(PostgresReadiness.Cancelled, "shutdown"); }
+Console.Error.WriteLine($"PostgreSQL startup: {readiness.Classification}");
+if (readiness.ExitCode != PostgresReadiness.Success || probeMode)
+    return readiness.ExitCode;
+if (shutdown.IsCancellationRequested) return PostgresReadiness.Cancelled;
 
 builder.Host.UseSerilog((context, services, configuration) => configuration
     .ReadFrom.Configuration(context.Configuration)
@@ -54,8 +84,7 @@ builder.Services.AddMudServices(cfg =>
     cfg.SnackbarConfiguration.VisibleStateDuration = 5000;
 });
 
-// Add DB connection, can swap this for SqlExpress or any other provider you have access to
-// By default loads my private DB, if it can't connect it falls back to the built in VS database (not suitable for production)
+// PostgreSQL is required. Registration has no second connection test or provider fallback.
 await builder.Services.AddThemeDataBaseConnection(config);
 
 //Add other services
@@ -145,4 +174,6 @@ app.Use(async (context, next) =>
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 
-app.Run();
+await app.RunAsync(shutdown.Token);
+Console.CancelKeyPress -= cancelHandler;
+return 0;

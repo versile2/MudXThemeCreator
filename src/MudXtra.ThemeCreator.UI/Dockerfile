@@ -28,4 +28,5 @@ RUN dotnet publish "./MudXtra.ThemeCreator.UI.csproj" -c $BUILD_CONFIGURATION -o
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
-ENTRYPOINT ["dotnet", "MudXtra.ThemeCreator.UI.dll"]
+COPY ["MudXtra.ThemeCreator.UI/docker-entrypoint.sh", "/app/docker-entrypoint.sh"]
+ENTRYPOINT ["/bin/sh", "/app/docker-entrypoint.sh"]

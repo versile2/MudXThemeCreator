@@ -1,0 +1,25 @@
+name: PostgreSQL startup guard checks
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [fix/postgres-startup-guard-20261003]
+permissions:
+  contents: read
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - name: Build application without starting it
+        run: dotnet build src/MudXtra.ThemeCreator.UI/MudXtra.ThemeCreator.UI.csproj -f net9.0 -c Release
+      - name: Single-attempt readiness contracts
+        run: dotnet run --project tests/PostgresGuard.Tests -f net9.0
+      - name: Docker entrypoint contracts
+        run: python3 tests/PostgresGuard.Tests/test_entrypoint.py
+      - name: Application failure, cancellation and listener contracts
+        run: python3 tests/PostgresGuard.Tests/test_app_process.py
